@@ -11,9 +11,11 @@ import {
   mergeRecords,
   nameFromPrompt,
   parseRecord,
+  parseSessionsArgs,
   recordFromTranscript,
   relativeTime,
   resumeCommand,
+  visibleSessions,
 } from '../hooks/history'
 import type { ExcerptLine, TranscriptSummary } from '../hooks/history'
 import { labelPrompt, labelTimeoutMs, limitWarning, parseLabel } from '../hooks/label'
@@ -183,6 +185,25 @@ describe('helpers', () => {
     expect(relativeTime('2026-10-11T07:00:00.000Z', START)).toBe('3h ago')
     expect(relativeTime('2026-10-08T10:00:00.000Z', START)).toBe('3d ago')
     expect(relativeTime('2026-08-01T10:00:00.000Z', START)).toBe('2026-08-01')
+  })
+
+  test('should list finished sessions only when asked and count the ones it hid', async () => {
+    const sessions = [
+      record({ id: 'open', name: 'Open work', status: 'pending' }),
+      record({ id: 'done', name: 'Done work', status: 'complete' }),
+      record({ id: 'new', name: 'New work' }),
+    ]
+
+    expect(visibleSessions(sessions, '', false)).toEqual({ rows: [sessions[0], sessions[2]], finished: 1 })
+    expect(visibleSessions(sessions, '', true)).toEqual({ rows: sessions, finished: 1 })
+    expect(visibleSessions(sessions, 'done', false)).toEqual({ rows: [], finished: 1 })
+    expect(visibleSessions(sessions, 'open', false)).toEqual({ rows: [sessions[0]], finished: 0 })
+  })
+
+  test('should read --all out of the /sessions arguments', async () => {
+    expect(parseSessionsArgs('  deploy  fix ')).toEqual({ filter: 'deploy fix', showAll: false })
+    expect(parseSessionsArgs('--all deploy')).toEqual({ filter: 'deploy', showAll: true })
+    expect(parseSessionsArgs('')).toEqual({ filter: '', showAll: false })
   })
 })
 
@@ -764,6 +785,79 @@ describe('/sessions', () => {
         'Sessions, most recent first (1 total):',
         '1. There session (/work/b · 1h ago · started 1d ago)',
         '   cd /work/b && claude --resume there',
+      ].join('\n'),
+    )
+  })
+
+  test('should hide finished sessions until the toggle shows them', async ($, on) => {
+    const { files } = setup(on, { cwd: '/work/a', sessionId: 'current' })
+    const resumed: string[] = []
+
+    seed(files, record({ id: 'open', name: 'Open work', status: 'pending', lastMessageAt: '2026-10-11T09:30:00.000Z' }), 1)
+    seed(files, record({ id: 'done', name: 'Done work', status: 'complete', lastMessageAt: '2026-10-11T09:00:00.000Z' }), 2)
+    seed(files, record({ id: 'new', name: 'Unlabeled work', lastMessageAt: '2026-10-11T08:00:00.000Z' }), 3)
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+    on('ui.close', () => ({ value: undefined }))
+    on('command.run', { command: 'resume' }, ($, e) => {
+      resumed.push(e.args)
+
+      return { text: '' }
+    })
+
+    await $.session.start({ cwd: '/work/a', surface: 'terminal', isInteractive: true })
+    await $.command.run({ ...TYPED, command: 'sessions', args: '' })
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const keys = async () => (await ui.findAll({ type: 'Button' })).map(row => row.key)
+    const toggle = async () => (await ui.findAll({ key: 'toggle-finished' }))[0]?.text
+
+    expect(await keys()).toEqual(['toggle-finished', 'session:open', 'session:new'])
+    expect(await toggle()).toBe('Show 1 finished')
+    expect(await ui.findAll({ text: /CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS/ })).toEqual([])
+
+    await ui.press({ key: 'toggle-finished' })
+
+    expect(await keys()).toEqual(['toggle-finished', 'session:open', 'session:done', 'session:new'])
+    expect(await toggle()).toBe('Hide finished')
+
+    await ui.press({ key: 'toggle-finished' })
+    await ui.input({ key: 'filter', text: 'done', kind: 'change' })
+
+    expect(await keys()).toEqual(['toggle-finished'])
+    expect(await toggle()).toBe('Show 1 finished')
+
+    await ui.input({ key: 'filter', text: 'done', kind: 'submit' })
+
+    expect(resumed).toEqual([])
+
+    await ui.unmount()
+  })
+
+  test('should warn while the exit bound is too short and list finished sessions with --all', async ($, on) => {
+    const { files } = setup(on, { cwd: '/work/a', sessionId: 'current', env: {} })
+
+    seed(files, record({ id: 'here', name: 'Here session' }), 1)
+    seed(files, record({ id: 'done', name: 'Done session', status: 'complete' }), 2)
+    on('ui.open', () => ({ value: { isPlaced: false, reason: 'no surface' } }))
+
+    const listed = await $.command.run({ ...TYPED, command: 'sessions', args: '' })
+    const all = await $.command.run({ ...TYPED, command: 'sessions', args: '--all done' })
+
+    expect(listed.text).toBe(
+      [
+        limitWarning(undefined),
+        'Sessions, most recent first (1 total):',
+        '1. Here session (/work/a · 1h ago · started 1d ago)',
+        '   /resume here',
+        '1 finished sessions hidden; /sessions --all lists them.',
+      ].join('\n'),
+    )
+    expect(all.text).toBe(
+      [
+        limitWarning(undefined),
+        'Sessions, most recent first (1 total):',
+        '1. ✓ Done session (/work/a · 1h ago · started 1d ago)',
+        '   /resume done',
       ].join('\n'),
     )
   })

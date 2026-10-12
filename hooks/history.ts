@@ -464,6 +464,38 @@ export function matchesFilter(record: SessionRecord, filter: string): boolean {
   return [record.name ?? '', record.cwd, record.id].some(field => field.toLowerCase().includes(needle))
 }
 
+/**
+ * What `/sessions` lists for `filter`: the matching sessions, finished ones only when `showFinished`, and how many
+ * finished ones matched.
+ */
+export function visibleSessions(
+  sessions: readonly SessionRecord[],
+  filter: string,
+  showFinished: boolean,
+): { rows: SessionRecord[]; finished: number } {
+  const matching = sessions.filter(record => matchesFilter(record, filter))
+  const finished = matching.filter(record => record.status === 'complete').length
+
+  return { rows: showFinished ? matching : matching.filter(record => record.status !== 'complete'), finished }
+}
+
+export function statusMarker(record: SessionRecord): string {
+  if (record.status === 'pending') {
+    return '•'
+  }
+
+  return record.status === 'complete' ? '✓' : ' '
+}
+
+/**
+ * `/sessions` arguments: an `--all` token lists finished sessions too; the other words are the filter.
+ */
+export function parseSessionsArgs(args: string): { filter: string; showAll: boolean } {
+  const words = args.trim().split(/\s+/).filter(word => word !== '')
+
+  return { filter: words.filter(word => word !== '--all').join(' '), showAll: words.includes('--all') }
+}
+
 export function byLastMessage(a: SessionRecord, b: SessionRecord): number {
   return (b.lastMessageAt ?? '').localeCompare(a.lastMessageAt ?? '')
 }

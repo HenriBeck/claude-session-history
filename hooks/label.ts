@@ -5,7 +5,7 @@ export const LABEL_MODEL = 'haiku'
 /**
  * The setting that bounds every `session.end` hook together; 1500 ms when unset.
  */
-export const END_LIMIT_VARIABLE = 'CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS'
+const END_LIMIT_VARIABLE = 'CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS'
 
 /** The longest a label call may take, inside the 10 s bound the install sets. */
 const LABEL_TIMEOUT_MS = 9000

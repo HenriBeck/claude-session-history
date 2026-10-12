@@ -10,14 +10,16 @@ import {
   conversationExcerpt,
   excerptLine,
   fit,
-  matchesFilter,
   parseRecord,
+  parseSessionsArgs,
   relativeTime,
   resumeCommand,
+  statusMarker,
   tildify,
+  visibleSessions,
 } from './history'
 import type { Touch } from './history'
-import { LABEL_MODEL, labelPrompt, labelTimeoutMs, parseLabel } from './label'
+import { LABEL_MODEL, labelPrompt, labelTimeoutMs, limitWarning, parseLabel } from './label'
 
 const PANE = 'session-history'
 const MAX_FILES = 300
@@ -33,6 +35,7 @@ const USER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge'])
 
 const viewAtom = atom({ plugin: 'session-history', key: 'view' } as const, null)
 const filterAtom = atom({ plugin: 'session-history', key: 'filter' } as const, '')
+const showFinishedAtom = atom({ plugin: 'session-history', key: 'showFinished' } as const, false)
 
 type Engine = EngineInterface
 
@@ -211,6 +214,7 @@ async function loadView($: Engine): Promise<SessionHistoryView> {
     home: (await $.env.get('HOME')) ?? '',
     loadedAt: await $.clock.now(),
     unreadable: [],
+    warning: limitWarning(await $.env.get('CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS')),
   }
 
   if (!(await $.fs.exists(dir))) {
@@ -252,17 +256,19 @@ function describe(record: SessionRecord, view: SessionHistoryView): string {
   return `${tildify(record.cwd, view.home)} · ${last} · started ${relativeTime(record.createdAt, view.loadedAt)}`
 }
 
-function listAsText(view: SessionHistoryView, matching: SessionRecord[]): string {
-  if (matching.length === 0) {
-    return 'No sessions in the history match.'
-  }
-
-  const lines = matching.slice(0, MAX_TEXT_ROWS).flatMap((record, index) => [
-    `${index + 1}. ${record.name ?? record.id} (${describe(record, view)})`,
+function listAsText(view: SessionHistoryView, rows: SessionRecord[], hiddenFinished: number): string {
+  const lines = rows.slice(0, MAX_TEXT_ROWS).flatMap((record, index) => [
+    `${index + 1}. ${record.status === null ? '' : `${statusMarker(record)} `}${record.name ?? record.id} (${describe(record, view)})`,
     `   ${record.cwd === view.currentCwd ? `/resume ${record.id}` : resumeCommand(record)}`,
   ])
 
-  return [`Sessions, most recent first (${matching.length} total):`, ...lines].join('\n')
+  return [
+    ...(view.warning === null ? [] : [view.warning]),
+    ...(rows.length === 0
+      ? ['No sessions in the history match.']
+      : [`Sessions, most recent first (${rows.length} total):`, ...lines]),
+    ...(hiddenFinished === 0 ? [] : [`${hiddenFinished} finished sessions hidden; /sessions --all lists them.`]),
+  ].join('\n')
 }
 
 /**
@@ -387,11 +393,12 @@ export const register: Register = on => {
 
   on('command.run', { command: 'sessions' }, async ($, e) => {
     const view = await loadView($)
-    const filter = e.args.trim()
-    const matching = view.sessions.filter(record => matchesFilter(record, filter))
+    const { filter, showAll } = parseSessionsArgs(e.args)
+    const { rows, finished } = visibleSessions(view.sessions, filter, showAll)
 
     await update($, viewAtom, () => view)
     await update($, filterAtom, () => filter)
+    await update($, showFinishedAtom, () => showAll)
 
     if (view.unreadable.length > 0) {
       $.ui.toast(`Skipped ${view.unreadable.length} unreadable history file(s): ${view.unreadable.join(', ')}`)
@@ -400,23 +407,25 @@ export const register: Register = on => {
     const opened = await $.ui.open({ id: PANE, title: 'Sessions', focus: true, closeOnEscape: true })
 
     if (!opened.isPlaced) {
-      return { text: listAsText(view, matching) }
+      return { text: listAsText(view, rows, showAll ? 0 : finished) }
     }
 
-    return { text: `Listed ${matching.length} earlier sessions. Pick one to resume; Esc closes the list.` }
+    return { text: `Listed ${rows.length} earlier sessions. Pick one to resume; Esc closes the list.` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const view = await read($, viewAtom)
     const filter = await read($, filterAtom)
+    const showFinished = await read($, showFinishedAtom)
 
     if (view === null) {
       return <Text dimColor>Run /sessions to load the session history.</Text>
     }
 
     const width = e.props.bodyColumns
-    const matching = view.sessions.filter(record => matchesFilter(record, filter)).slice(0, MAX_ROWS)
+    const { rows, finished } = visibleSessions(view.sessions, filter, showFinished)
+    const shown = rows.slice(0, MAX_ROWS)
     const nameWidth = Math.min(48, Math.max(12, Math.floor(width * 0.45)))
     let filterInput = null
 
@@ -432,7 +441,7 @@ export const register: Register = on => {
           autoFocus
           onInput={value => update($, filterAtom, () => value)}
           onSubmit={(value, input) => {
-            const first = view.sessions.find(record => matchesFilter(record, value))
+            const first = visibleSessions(view.sessions, value, showFinished).rows[0]
 
             return first === undefined ? undefined : resume($, first, view, input.surface)
           }}
@@ -443,19 +452,25 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {filterInput}
+        {view.warning !== null && <Text color="yellow">{fit(view.warning, width * 3)}</Text>}
+        {finished > 0 && (
+          <Button key="toggle-finished" onPress={() => update($, showFinishedAtom, isShown => !isShown)}>
+            {showFinished ? 'Hide finished' : `Show ${finished} finished`}
+          </Button>
+        )}
         <Text dimColor>
-          {fit(`${matching.length} sessions · ↗ = other directory, copies a resume command`, width)}
+          {fit(`${shown.length} sessions · • pending · ✓ finished · ↗ other directory, copies a resume command`, width)}
         </Text>
-        {matching.length === 0 && <Text dimColor>No sessions match.</Text>}
-        {matching.map(record => {
-          const marker = record.cwd === view.currentCwd ? '  ' : '↗ '
+        {shown.length === 0 && <Text dimColor>No sessions match.</Text>}
+        {shown.map(record => {
+          const marker = `${statusMarker(record)}${record.cwd === view.currentCwd ? ' ' : '↗'} `
           const name = fit(record.name ?? record.id, nameWidth).padEnd(nameWidth)
 
           return (
             <Button key={`session:${record.id}`} plain onPress={press => resume($, record, view, press.surface)}>
               {marker}
               {name}
-              <Text dimColor> {fit(describe(record, view), Math.max(0, width - nameWidth - 3))}</Text>
+              <Text dimColor> {fit(describe(record, view), Math.max(0, width - nameWidth - 4))}</Text>
             </Button>
           )
         })}

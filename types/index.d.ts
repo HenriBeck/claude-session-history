@@ -36,6 +36,8 @@ export type SessionHistoryView = {
   loadedAt: number
   /** History files that could not be read or parsed. */
   unreadable: string[]
+  /** Why sessions are not being labeled at close, while the exit bound is too short; null when it is long enough. */
+  warning: string | null
 }
 
 declare module 'claude-code' {
@@ -43,6 +45,7 @@ declare module 'claude-code' {
     'session-history': {
       view: SessionHistoryView | null
       filter: string
+      showFinished: boolean
     }
   }
 }

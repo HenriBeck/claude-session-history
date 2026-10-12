@@ -27,6 +27,12 @@ const WRAPPED_INPUT =
 const INTERACTIVE_ENTRYPOINTS = new Set(['cli', 'claude-desktop'])
 
 /**
+ * The opening of the summary a compaction leaves in place of the conversation it replaced; its "next step" and
+ * "pending tasks" sections describe the past, not how the conversation ended.
+ */
+const COMPACT_SUMMARY = /^This session is being continued from a previous conversation/
+
+/**
  * What one session event contributes to its record: `prompt` is null for a session start or a rename.
  */
 export type Touch = {
@@ -90,6 +96,7 @@ export function applyTouch(existing: SessionRecord | null, touch: Touch, facts: 
     lastMessageAt: null,
     messageCount: 0,
     status: null,
+    labelError: null,
   }
 
   return {
@@ -98,6 +105,7 @@ export function applyTouch(existing: SessionRecord | null, touch: Touch, facts: 
     lastMessageAt: touch.prompt === null ? base.lastMessageAt : facts.now,
     messageCount: facts.turns,
     status: touch.prompt === null ? base.status : null,
+    labelError: touch.prompt === null ? base.labelError : null,
   }
 }
 
@@ -146,7 +154,13 @@ export function parseRecord(text: string, path: string): SessionRecord {
     throw new Error(`session-history: ${path} is not a session record`)
   }
 
-  return { ...(value as SessionRecord), status: readStatus((value as { status?: unknown }).status) }
+  const { status, labelError } = value as { status?: unknown; labelError?: unknown }
+
+  return {
+    ...(value as SessionRecord),
+    status: readStatus(status),
+    labelError: typeof labelError === 'string' ? labelError : null,
+  }
 }
 
 function readStatus(value: unknown): SessionStatus | null {
@@ -294,7 +308,7 @@ function promptText(content: unknown): string | null {
  * The text of one message for the labeler; null for tool traffic, other roles and messages without text.
  *
  * A user message carrying a tool result is tool output, not a prompt; text blocks the engine wrapped around a
- * prompt (reminders, command echoes) are dropped one by one.
+ * prompt (reminders, command echoes) and a compaction's summary are dropped one by one.
  */
 export function excerptLine(role: unknown, content: unknown): ExcerptLine | null {
   if (role !== 'user' && role !== 'assistant') {
@@ -315,7 +329,7 @@ export function excerptLine(role: unknown, content: unknown): ExcerptLine | null
 
   const texts = blocks
     .flatMap(block => (block.type === 'text' && typeof block.text === 'string' ? [block.text.trim()] : []))
-    .filter(text => text !== '' && (role === 'assistant' || !WRAPPED_INPUT.test(text)))
+    .filter(text => text !== '' && (role === 'assistant' || !(WRAPPED_INPUT.test(text) || COMPACT_SUMMARY.test(text))))
 
   return texts.length === 0 ? null : { role, text: texts.join('\n') }
 }
@@ -390,6 +404,7 @@ export function recordFromTranscript(
       lastMessageAt: summary.lastPromptAt,
       messageCount: summary.prompts,
       status: null,
+      labelError: null,
     },
     isCwdGuessed: matching === undefined,
   }
@@ -421,6 +436,7 @@ export function mergeRecords(existing: SessionRecord | null, found: SessionRecor
   }
 
   const named = nameRank(existing) > nameRank(found) ? existing : found
+  const isStale = isLaterPrompt(found.lastMessageAt, existing.lastMessageAt)
 
   return {
     id: found.id,
@@ -430,7 +446,8 @@ export function mergeRecords(existing: SessionRecord | null, found: SessionRecor
     createdAt: existing.createdAt < found.createdAt ? existing.createdAt : found.createdAt,
     lastMessageAt: latest(existing.lastMessageAt, found.lastMessageAt),
     messageCount: Math.max(existing.messageCount, found.messageCount),
-    status: isLaterPrompt(found.lastMessageAt, existing.lastMessageAt) ? null : existing.status,
+    status: isStale ? null : existing.status,
+    labelError: isStale ? null : existing.labelError,
   }
 }
 
@@ -477,6 +494,21 @@ export function visibleSessions(
   const finished = matching.filter(record => record.status === 'complete').length
 
   return { rows: showFinished ? matching : matching.filter(record => record.status !== 'complete'), finished }
+}
+
+/**
+ * What `/sessions` says when closes could not label sessions: how many, and the most recent one's reason.
+ */
+export function labelFailureWarning(sessions: readonly SessionRecord[]): string | null {
+  const failed = sessions.filter(record => record.labelError !== null).sort(byLastMessage)
+  const latest = failed[0]
+
+  if (latest === undefined) {
+    return null
+  }
+
+  return `${failed.length} sessions could not be labeled when they closed (latest: ${latest.labelError}). `
+    + 'They stay listed; node scripts/backfill.mjs --label retries them.'
 }
 
 export function statusMarker(record: SessionRecord): string {

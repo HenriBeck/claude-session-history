@@ -141,7 +141,7 @@ async function label(item, cwd) {
 
   const current = parseRecord(await readFile(item.target, 'utf8'), item.target)
 
-  await writeRecord(item.target, { ...current, status })
+  await writeRecord(item.target, { ...current, status, labelError: null })
 
   return status
 }

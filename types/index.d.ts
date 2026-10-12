@@ -21,6 +21,11 @@ export type SessionRecord = {
    * was still open; null until a close labels it, and again after every prompt.
    */
   status: SessionStatus | null
+  /**
+   * Why the last close could not label the session (no answer, an unexpected reply, a failure); null when it did,
+   * or when no close tried since the last prompt.
+   */
+  labelError: string | null
 }
 
 export type SessionStatus = 'complete' | 'pending'
@@ -36,8 +41,10 @@ export type SessionHistoryView = {
   loadedAt: number
   /** History files that could not be read or parsed. */
   unreadable: string[]
-  /** Why sessions are not being labeled at close, while the exit bound is too short; null when it is long enough. */
-  warning: string | null
+  /**
+   * What keeps sessions from being labeled at close: an exit bound too short for it, closes that could not label.
+   */
+  warnings: string[]
 }
 
 declare module 'claude-code' {

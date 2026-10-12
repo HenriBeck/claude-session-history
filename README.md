@@ -12,7 +12,8 @@ keeping its terminal tab open or remembering its session ID.
   the background. A `/rename` title always wins.
 - Labels a session **complete** or **pending** when it closes (`/exit`, Ctrl+C, closing the tab, `/clear`,
   `/resume`): Haiku reads the end of the conversation and calls it pending when a question to you is unanswered,
-  requested work is unfinished, or Claude said it would do something next. A new prompt clears the label.
+  requested work is unfinished, or Claude said it would do something next. A new prompt clears the label. When a
+  close can't label a session (no answer, an error), `/sessions` says so and keeps the session listed.
 - `/sessions` hides complete sessions. **Show N finished** in the list shows them again, and `/sessions --all`
   includes them in the text listing. Pending sessions are marked `•`, complete ones `✓`.
 - `/sessions [filter]` lists earlier sessions, most recent first. Type to filter by name, directory or ID; pick one

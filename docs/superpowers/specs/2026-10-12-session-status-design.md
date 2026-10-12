@@ -17,7 +17,8 @@ toggle shows them again.
 
 ## Record
 
-`SessionRecord` gains `status: 'complete' | 'pending' | null`.
+`SessionRecord` gains `status: 'complete' | 'pending' | null` and `labelError: string | null` (why the last close
+could not label it).
 
 - `parseRecord` reads a file without `status` as `null`.
 - `applyTouch` sets `status` to `null` on every prompt, so a resumed session is listed again until its next close.
@@ -34,7 +35,9 @@ The `session.end` hook labels the ending session (`e.sessionId`) before it calls
 - **What the model sees:** the conversation comes from `$.session.messages({ as: 'api' })`, and `conversationExcerpt`
   turns it into an excerpt:
   - Only the `text` blocks of user and assistant messages, written as `User:` and `Claude:` paragraphs.
-  - User messages that `promptText` rejects (tool results, wrapper tags, empty) are skipped.
+  - User messages that `promptText` rejects (tool results, wrapper tags, empty) are skipped, and so is the summary
+    a compaction leaves (it opens with "This session is being continued from a previous conversation"), as the
+    backfill skips `isCompactSummary` entries.
   - The excerpt keeps the end of the conversation, at most 8,000 characters. A message longer than that keeps its
     tail.
 - **The model call:** `$.model.complete` with `model: 'haiku'`, `effort: 'low'` and `maxTokens: 5`. The system prompt
@@ -51,8 +54,10 @@ The `session.end` hook labels the ending session (`e.sessionId`) before it calls
     minus 300 ms for the record write and core, at most 9 s. With less than 500 ms left it skips the call.
   - The bound is 1.5 s unless `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` raises it. The install sets it to `10000`
     in the `env` of `~/.claude/settings.json`.
-- **On failure:** `status` stays `null`, so the session stays listed, and the failure goes to the debug log
-  (`$.ui.log(..., { to: 'debug' })`), since the session's screen is closing.
+- **On failure:** `status` stays `null`, so the session stays listed. The reason is kept on the record as
+  `labelError` and goes to the debug log (`$.ui.log(..., { to: 'debug' })`), which is only written under `--debug`.
+  - `/sessions` turns `labelError` into a warning line: how many sessions a close could not label, and the latest
+    reason. A prompt, a later successful label or `backfill.mjs --label` clears it.
   - A skipped call, an unanswered call, an empty excerpt or an unexpected reply is logged by the hook itself.
   - A throw or a timeout, including a write error, is logged by the hook's `.catch` as
     `session-history: labeling the session failed (...)`.

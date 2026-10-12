@@ -10,6 +10,7 @@ import {
   conversationExcerpt,
   excerptLine,
   fit,
+  labelFailureWarning,
   parseRecord,
   parseSessionsArgs,
   relativeTime,
@@ -147,7 +148,7 @@ async function generateName($: Engine, id: string, prompt: string, serialize: Se
  * Labels an ending session complete or pending from the end of its conversation, within what the exit leaves.
  *
  * Sessions without a record (headless runs) or without a prompt are left alone; a skipped or unusable answer
- * leaves the session unlabeled, so `/sessions` keeps listing it, and says why in the debug log.
+ * leaves the session unlabeled, so `/sessions` keeps listing it, and keeps why on its record and in the debug log.
  */
 async function labelSession($: Engine, id: string, context: LabelContext): Promise<void> {
   const path = recordPath(await historyDir($), id)
@@ -169,7 +170,10 @@ async function labelSession($: Engine, id: string, context: LabelContext): Promi
   const timeoutMs = labelTimeoutMs(context.remainingMs())
 
   if (timeoutMs === null) {
-    $.ui.log(`session-history: no time left to label ${id} (${Math.floor(context.remainingMs())} ms)`, { to: 'debug' })
+    const left = Math.floor(context.remainingMs())
+
+    $.ui.log(`session-history: no time left to label ${id} (${left} ms)`, { to: 'debug' })
+    await recordLabelError($, id, `no time left at close (${left} ms)`, context.serialize)
 
     return
   }
@@ -181,6 +185,7 @@ async function labelSession($: Engine, id: string, context: LabelContext): Promi
 
   if (!reply.isAnswered) {
     $.ui.log(`session-history: labeling ${id} got no answer (${reply.reason})`, { to: 'debug' })
+    await recordLabelError($, id, `no answer (${reply.reason})`, context.serialize)
 
     return
   }
@@ -188,9 +193,10 @@ async function labelSession($: Engine, id: string, context: LabelContext): Promi
   const status = parseLabel(reply.text)
 
   if (status === null) {
-    $.ui.log(`session-history: labeling ${id} got an unexpected reply: ${JSON.stringify(reply.text.slice(0, 200))}`, {
-      to: 'debug',
-    })
+    const shown = JSON.stringify(reply.text.slice(0, 200))
+
+    $.ui.log(`session-history: labeling ${id} got an unexpected reply: ${shown}`, { to: 'debug' })
+    await recordLabelError($, id, `unexpected reply: ${shown}`, context.serialize)
 
     return
   }
@@ -199,7 +205,21 @@ async function labelSession($: Engine, id: string, context: LabelContext): Promi
     const current = await readRecord($, path)
 
     if (current !== null) {
-      await writeRecord($, path, { ...current, status })
+      await writeRecord($, path, { ...current, status, labelError: null })
+    }
+  })
+}
+
+/**
+ * Keeps why a close could not label a session on its record, so `/sessions` can say so.
+ */
+async function recordLabelError($: Engine, id: string, reason: string, serialize: Serialize): Promise<void> {
+  await serialize(async () => {
+    const path = recordPath(await historyDir($), id)
+    const current = await readRecord($, path)
+
+    if (current !== null) {
+      await writeRecord($, path, { ...current, labelError: reason })
     }
   })
 }
@@ -207,6 +227,7 @@ async function labelSession($: Engine, id: string, context: LabelContext): Promi
 async function loadView($: Engine): Promise<SessionHistoryView> {
   const dir = await historyDir($)
   const currentId = await $.session.id()
+  const limit = limitWarning(await $.env.get('CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS'))
   const view: SessionHistoryView = {
     sessions: [],
     currentId,
@@ -214,7 +235,7 @@ async function loadView($: Engine): Promise<SessionHistoryView> {
     home: (await $.env.get('HOME')) ?? '',
     loadedAt: await $.clock.now(),
     unreadable: [],
-    warning: limitWarning(await $.env.get('CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS')),
+    warnings: limit === null ? [] : [limit],
   }
 
   if (!(await $.fs.exists(dir))) {
@@ -246,6 +267,11 @@ async function loadView($: Engine): Promise<SessionHistoryView> {
   }
 
   view.sessions.sort(byLastMessage)
+  const failures = labelFailureWarning(view.sessions)
+
+  if (failures !== null) {
+    view.warnings.push(failures)
+  }
 
   return view
 }
@@ -263,7 +289,7 @@ function listAsText(view: SessionHistoryView, rows: SessionRecord[], hiddenFinis
   ])
 
   return [
-    ...(view.warning === null ? [] : [view.warning]),
+    ...view.warnings,
     ...(rows.length === 0
       ? ['No sessions in the history match.']
       : [`Sessions, most recent first (${rows.length} total):`, ...lines]),
@@ -370,8 +396,18 @@ export const register: Register = on => {
     })
 
     return next(e)
-  }).catch(($, e, next) => {
+  }).catch(async ($, e, next) => {
     reportFailure($, 'labeling the session', next.error, 'debug')
+
+    if (next.error.kind !== 're-entry') {
+      const reason = `${next.error.kind}: ${next.error.message ?? 'no message'}`
+
+      await recordLabelError($, e.sessionId, reason, serialized).catch(error => {
+        $.ui.log(`session-history: keeping the labeling failure failed: ${error instanceof Error ? error.message : String(error)}`, {
+          to: 'debug',
+        })
+      })
+    }
 
     return next(e)
   })
@@ -452,7 +488,11 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {filterInput}
-        {view.warning !== null && <Text color="yellow">{fit(view.warning, width * 3)}</Text>}
+        {view.warnings.map(warning => (
+          <Text key={`warning:${warning}`} color="yellow">
+            {fit(warning, width * 3)}
+          </Text>
+        ))}
         {finished > 0 && (
           <Button key="toggle-finished" onPress={() => update($, showFinishedAtom, isShown => !isShown)}>
             {showFinished ? 'Hide finished' : `Show ${finished} finished`}

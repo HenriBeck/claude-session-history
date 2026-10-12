@@ -8,6 +8,7 @@ import {
   conversationExcerpt,
   emptyTranscriptSummary,
   excerptLine,
+  labelFailureWarning,
   mergeRecords,
   nameFromPrompt,
   parseRecord,
@@ -156,6 +157,7 @@ function record(overrides: Partial<SessionRecord> & Pick<SessionRecord, 'id'>): 
     lastMessageAt: '2026-10-11T09:00:00.000Z',
     messageCount: 3,
     status: null,
+    labelError: null,
     ...overrides,
   }
 }
@@ -205,6 +207,19 @@ describe('helpers', () => {
     expect(parseSessionsArgs('--all deploy')).toEqual({ filter: 'deploy', showAll: true })
     expect(parseSessionsArgs('')).toEqual({ filter: '', showAll: false })
   })
+
+  test('should say how many sessions a close could not label, and the latest reason', async () => {
+    expect(labelFailureWarning([record({ id: 'a' }), record({ id: 'b', status: 'complete' })])).toBe(null)
+    expect(
+      labelFailureWarning([
+        record({ id: 'older', labelError: 'no answer (api-error)', lastMessageAt: '2026-10-11T08:00:00.000Z' }),
+        record({ id: 'newer', labelError: 'throw: model not allowed', lastMessageAt: '2026-10-11T09:00:00.000Z' }),
+      ]),
+    ).toBe(
+      '2 sessions could not be labeled when they closed (latest: throw: model not allowed). They stay listed; '
+        + 'node scripts/backfill.mjs --label retries them.',
+    )
+  })
 })
 
 describe('excerpt', () => {
@@ -226,6 +241,15 @@ describe('excerpt', () => {
     ).toEqual({ role: 'assistant', text: 'Running the tests.' })
     expect(excerptLine('assistant', [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }])).toBe(null)
     expect(excerptLine('system', 'x')).toBe(null)
+    expect(
+      excerptLine('user', [
+        {
+          type: 'text',
+          text: 'This session is being continued from a previous conversation that ran out of context. The summary '
+            + 'below covers the earlier portion.\n\n9. Optional Next Step: push the branch',
+        },
+      ]),
+    ).toBe(null)
   })
 
   test('should keep the end of a conversation within the excerpt length', async () => {
@@ -328,6 +352,7 @@ describe('recording', () => {
       lastMessageAt: null,
       messageCount: 0,
       status: null,
+      labelError: null,
     })
 
     await clock.advance(60_000)
@@ -345,6 +370,7 @@ describe('recording', () => {
       lastMessageAt: '2026-10-11T10:01:00.000Z',
       messageCount: 1,
       status: null,
+      labelError: null,
     })
 
     await clock.advance(1)
@@ -359,6 +385,7 @@ describe('recording', () => {
       lastMessageAt: '2026-10-11T10:01:00.000Z',
       messageCount: 1,
       status: null,
+      labelError: null,
     })
 
     await clock.advance(59_999)
@@ -375,6 +402,7 @@ describe('recording', () => {
       lastMessageAt: '2026-10-11T10:02:00.000Z',
       messageCount: 2,
       status: null,
+      labelError: null,
     })
   })
 
@@ -393,6 +421,7 @@ describe('recording', () => {
       lastMessageAt: null,
       messageCount: 5,
       status: null,
+      labelError: null,
     })
   })
 
@@ -415,6 +444,7 @@ describe('recording', () => {
       lastMessageAt: '2026-10-11T10:00:00.000Z',
       messageCount: 1,
       status: null,
+      labelError: null,
     })
   })
 
@@ -438,7 +468,11 @@ describe('recording', () => {
   test('should clear the label when a closed session gets a new prompt', async ($, on) => {
     const { files } = setup(on, { cwd: '/work/a', sessionId: 's1', turns: 3 })
 
-    seed(files, record({ id: 's1', name: 'Done work', nameSource: 'generated', status: 'complete' }), 1)
+    seed(
+      files,
+      record({ id: 's1', name: 'Done work', nameSource: 'generated', status: 'complete', labelError: 'no answer (aborted)' }),
+      1,
+    )
     await $.prompt.submit({ ...TYPED_PROMPT, text: 'One more thing' })
 
     expect(readRecord(files, 's1')).toEqual(record({
@@ -479,7 +513,7 @@ describe('labeling at close', () => {
     const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: CONVERSATION })
     const asked = answer(on, 'Pending')
 
-    seed(files, record({ id: 's1', name: 'GitHub repo' }), 1)
+    seed(files, record({ id: 's1', name: 'GitHub repo', labelError: 'no answer (api-error)' }), 1)
 
     expect(await $.session.end(END)).toEqual({ sessionId: 's1' })
     expect(readRecord(files, 's1')).toEqual(record({ id: 's1', name: 'GitHub repo', status: 'pending' }))
@@ -530,7 +564,7 @@ describe('labeling at close', () => {
     seed(files, record({ id: 's1' }), 1)
     await $.session.end(END)
 
-    expect(readRecord(files, 's1').status).toBe(null)
+    expect(readRecord(files, 's1')).toEqual(record({ id: 's1', labelError: 'unexpected reply: "Pending — no answer yet"' }))
     expect(logs).toEqual(['debug: session-history: labeling s1 got an unexpected reply: "Pending — no answer yet"'])
   })
 
@@ -541,7 +575,7 @@ describe('labeling at close', () => {
     seed(files, record({ id: 's1' }), 1)
     await $.session.end(END)
 
-    expect(readRecord(files, 's1').status).toBe(null)
+    expect(readRecord(files, 's1')).toEqual(record({ id: 's1', labelError: 'no answer (empty-reply)' }))
     expect(logs).toEqual(['debug: session-history: labeling s1 got no answer (empty-reply)'])
   })
 
@@ -553,6 +587,8 @@ describe('labeling at close', () => {
 
     expect(await $.session.end(END)).toEqual({ sessionId: 's1' })
     expect(readRecord(files, 's1').status).toBe(null)
+    expect(readRecord(files, 's1').labelError).toContain('throw: ')
+    expect(readRecord(files, 's1').labelError).toContain('offline')
     expect(logs).toHaveLength(1)
     expect(logs[0]).toContain('debug: session-history: labeling the session failed (throw)')
     expect(logs[0]).toContain('offline')
@@ -604,6 +640,7 @@ describe('backfill', () => {
         lastMessageAt: '2026-10-01T09:30:00.000Z',
         messageCount: 2,
         status: null,
+        labelError: null,
       },
       isCwdGuessed: false,
     })
@@ -628,6 +665,7 @@ describe('backfill', () => {
         lastMessageAt: '2026-10-01T09:00:00.000Z',
         messageCount: 1,
         status: null,
+        labelError: null,
       },
       isCwdGuessed: false,
     })
@@ -673,12 +711,13 @@ describe('backfill', () => {
       lastMessageAt: '2026-10-11T10:00:00.000Z',
       messageCount: 7,
       status: null,
+      labelError: null,
     })
     expect(mergeRecords(record({ id: 'm', name: 'A later prompt', nameSource: 'prompt' }), found)).toEqual(found)
     expect(mergeRecords(null, found)).toEqual(found)
   })
   test('should read a record without a label as unlabeled', async () => {
-    const { status: _, ...unlabeled } = record({ id: 'old' })
+    const { status: _, labelError: __, ...unlabeled } = record({ id: 'old' })
 
     expect(parseRecord(JSON.stringify(unlabeled), 'old.json')).toEqual(record({ id: 'old' }))
     expect(parseRecord(JSON.stringify({ ...unlabeled, status: 'done' }), 'old.json')).toEqual(record({ id: 'old' }))
@@ -833,10 +872,19 @@ describe('/sessions', () => {
     await ui.unmount()
   })
 
+  test('should warn about the exit bound before anything was recorded', async ($, on) => {
+    setup(on, { cwd: '/work/a', sessionId: 'current', env: {} })
+    on('ui.open', () => ({ value: { isPlaced: false, reason: 'no surface' } }))
+
+    const listed = await $.command.run({ ...TYPED, command: 'sessions', args: '' })
+
+    expect(listed.text).toBe([limitWarning(undefined), 'No sessions in the history match.'].join('\n'))
+  })
+
   test('should warn while the exit bound is too short and list finished sessions with --all', async ($, on) => {
     const { files } = setup(on, { cwd: '/work/a', sessionId: 'current', env: {} })
 
-    seed(files, record({ id: 'here', name: 'Here session' }), 1)
+    seed(files, record({ id: 'here', name: 'Here session', labelError: 'no answer (aborted)' }), 1)
     seed(files, record({ id: 'done', name: 'Done session', status: 'complete' }), 2)
     on('ui.open', () => ({ value: { isPlaced: false, reason: 'no surface' } }))
 
@@ -846,6 +894,8 @@ describe('/sessions', () => {
     expect(listed.text).toBe(
       [
         limitWarning(undefined),
+        '1 sessions could not be labeled when they closed (latest: no answer (aborted)). They stay listed; '
+          + 'node scripts/backfill.mjs --label retries them.',
         'Sessions, most recent first (1 total):',
         '1. Here session (/work/a · 1h ago · started 1d ago)',
         '   /resume here',
@@ -855,6 +905,8 @@ describe('/sessions', () => {
     expect(all.text).toBe(
       [
         limitWarning(undefined),
+        '1 sessions could not be labeled when they closed (latest: no answer (aborted)). They stay listed; '
+          + 'node scripts/backfill.mjs --label retries them.',
         'Sessions, most recent first (1 total):',
         '1. ✓ Done session (/work/a · 1h ago · started 1d ago)',
         '   /resume done',

@@ -1,9 +1,14 @@
-import type { SessionRecord } from '../types'
+import type { SessionRecord, SessionStatus } from '../types'
 
 const NAME_LENGTH = 60
 const SESSION_ID = /^[A-Za-z0-9_-]+$/
 const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/
 const NAME_RANK = { renamed: 3, generated: 2, prompt: 1 } as const
+
+/**
+ * How much later a transcript may stamp a prompt than the live record of that same prompt.
+ */
+const SAME_PROMPT_MS = 60_000
 
 /**
  * Transcript user entries the engine wrote around a prompt rather than the person typing one.
@@ -74,6 +79,7 @@ export function applyTouch(existing: SessionRecord | null, touch: Touch, facts: 
     createdAt: facts.startedAt,
     lastMessageAt: null,
     messageCount: 0,
+    status: null,
   }
 
   return {
@@ -81,6 +87,7 @@ export function applyTouch(existing: SessionRecord | null, touch: Touch, facts: 
     ...pickName(base, touch),
     lastMessageAt: touch.prompt === null ? base.lastMessageAt : facts.now,
     messageCount: facts.turns,
+    status: touch.prompt === null ? base.status : null,
   }
 }
 
@@ -129,7 +136,11 @@ export function parseRecord(text: string, path: string): SessionRecord {
     throw new Error(`session-history: ${path} is not a session record`)
   }
 
-  return value as SessionRecord
+  return { ...(value as SessionRecord), status: readStatus((value as { status?: unknown }).status) }
+}
+
+function readStatus(value: unknown): SessionStatus | null {
+  return value === 'complete' || value === 'pending' ? value : null
 }
 
 /**
@@ -288,6 +299,7 @@ export function recordFromTranscript(
       createdAt: summary.firstAt ?? summary.lastPromptAt,
       lastMessageAt: summary.lastPromptAt,
       messageCount: summary.prompts,
+      status: null,
     },
     isCwdGuessed: matching === undefined,
   }
@@ -311,7 +323,7 @@ function nameFromTranscript(summary: TranscriptSummary): Pick<SessionRecord, 'na
 
 /**
  * Combines a recorded session with what its transcript says: the better-sourced name, the transcript's
- * directory, the earliest start and the latest message.
+ * directory, the earliest start, the latest message, and the label unless a later prompt made it stale.
  */
 export function mergeRecords(existing: SessionRecord | null, found: SessionRecord): SessionRecord {
   if (existing === null) {
@@ -328,11 +340,24 @@ export function mergeRecords(existing: SessionRecord | null, found: SessionRecor
     createdAt: existing.createdAt < found.createdAt ? existing.createdAt : found.createdAt,
     lastMessageAt: latest(existing.lastMessageAt, found.lastMessageAt),
     messageCount: Math.max(existing.messageCount, found.messageCount),
+    status: isLaterPrompt(found.lastMessageAt, existing.lastMessageAt) ? null : existing.status,
   }
 }
 
 function latest(a: string | null, b: string | null): string | null {
   return (a ?? '') > (b ?? '') ? a : b
+}
+
+function isLaterPrompt(found: string | null, recorded: string | null): boolean {
+  if (found === null) {
+    return false
+  }
+
+  if (recorded === null) {
+    return true
+  }
+
+  return Date.parse(found) - Date.parse(recorded) > SAME_PROMPT_MS
 }
 
 function nameRank(record: SessionRecord): number {

@@ -8,6 +8,7 @@ import {
   emptyTranscriptSummary,
   mergeRecords,
   nameFromPrompt,
+  parseRecord,
   recordFromTranscript,
   relativeTime,
   resumeCommand,
@@ -132,6 +133,7 @@ function record(overrides: Partial<SessionRecord> & Pick<SessionRecord, 'id'>): 
     createdAt: '2026-10-10T08:00:00.000Z',
     lastMessageAt: '2026-10-11T09:00:00.000Z',
     messageCount: 3,
+    status: null,
     ...overrides,
   }
 }
@@ -185,6 +187,7 @@ describe('recording', () => {
       createdAt: '2026-10-11T10:00:00.000Z',
       lastMessageAt: null,
       messageCount: 0,
+      status: null,
     })
 
     await clock.advance(60_000)
@@ -201,6 +204,7 @@ describe('recording', () => {
       createdAt: '2026-10-11T10:00:00.000Z',
       lastMessageAt: '2026-10-11T10:01:00.000Z',
       messageCount: 1,
+      status: null,
     })
 
     await clock.advance(1)
@@ -214,6 +218,7 @@ describe('recording', () => {
       createdAt: '2026-10-11T10:00:00.000Z',
       lastMessageAt: '2026-10-11T10:01:00.000Z',
       messageCount: 1,
+      status: null,
     })
 
     await clock.advance(59_999)
@@ -229,6 +234,7 @@ describe('recording', () => {
       createdAt: '2026-10-11T10:00:00.000Z',
       lastMessageAt: '2026-10-11T10:02:00.000Z',
       messageCount: 2,
+      status: null,
     })
   })
 
@@ -246,6 +252,7 @@ describe('recording', () => {
       createdAt: '2026-10-11T08:00:00.000Z',
       lastMessageAt: null,
       messageCount: 5,
+      status: null,
     })
   })
 
@@ -267,6 +274,7 @@ describe('recording', () => {
       createdAt: '2026-10-11T10:00:00.000Z',
       lastMessageAt: '2026-10-11T10:00:00.000Z',
       messageCount: 1,
+      status: null,
     })
   })
 
@@ -286,6 +294,21 @@ describe('recording', () => {
     await $.prompt.submit({ ...TYPED_PROMPT, text: 'A task finished', origin: { kind: 'task-notification' } })
 
     expect(files.size).toBe(0)
+  })
+  test('should clear the label when a closed session gets a new prompt', async ($, on) => {
+    const { files } = setup(on, { cwd: '/work/a', sessionId: 's1', turns: 3 })
+
+    seed(files, record({ id: 's1', name: 'Done work', nameSource: 'generated', status: 'complete' }), 1)
+    await $.prompt.submit({ ...TYPED_PROMPT, text: 'One more thing' })
+
+    expect(readRecord(files, 's1')).toEqual(record({
+      id: 's1',
+      name: 'Done work',
+      nameSource: 'generated',
+      lastMessageAt: '2026-10-11T10:00:00.000Z',
+      messageCount: 4,
+      status: null,
+    }))
   })
 })
 
@@ -333,6 +356,7 @@ describe('backfill', () => {
         createdAt: '2026-10-01T09:00:00.000Z',
         lastMessageAt: '2026-10-01T09:30:00.000Z',
         messageCount: 2,
+        status: null,
       },
       isCwdGuessed: false,
     })
@@ -356,6 +380,7 @@ describe('backfill', () => {
         createdAt: '2026-10-01T09:00:00.000Z',
         lastMessageAt: '2026-10-01T09:00:00.000Z',
         messageCount: 1,
+        status: null,
       },
       isCwdGuessed: false,
     })
@@ -400,9 +425,24 @@ describe('backfill', () => {
       createdAt: '2026-10-10T08:00:00.000Z',
       lastMessageAt: '2026-10-11T10:00:00.000Z',
       messageCount: 7,
+      status: null,
     })
     expect(mergeRecords(record({ id: 'm', name: 'A later prompt', nameSource: 'prompt' }), found)).toEqual(found)
     expect(mergeRecords(null, found)).toEqual(found)
+  })
+  test('should read a record without a label as unlabeled', async () => {
+    const { status: _, ...unlabeled } = record({ id: 'old' })
+
+    expect(parseRecord(JSON.stringify(unlabeled), 'old.json')).toEqual(record({ id: 'old' }))
+    expect(parseRecord(JSON.stringify({ ...unlabeled, status: 'done' }), 'old.json')).toEqual(record({ id: 'old' }))
+    expect(parseRecord(JSON.stringify({ ...unlabeled, status: 'pending' }), 'old.json').status).toBe('pending')
+  })
+
+  test('should keep a label unless the transcript has a later prompt', async () => {
+    const labeled = record({ id: 'm', status: 'pending', lastMessageAt: '2026-10-11T09:00:00.000Z' })
+
+    expect(mergeRecords(labeled, record({ id: 'm', lastMessageAt: '2026-10-11T09:00:00.400Z' })).status).toBe('pending')
+    expect(mergeRecords(labeled, record({ id: 'm', lastMessageAt: '2026-10-11T11:00:00.000Z' })).status).toBe(null)
   })
 })
 

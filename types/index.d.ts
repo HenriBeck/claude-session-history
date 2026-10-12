@@ -16,7 +16,14 @@ export type SessionRecord = {
   /** ISO timestamp of the latest prompt; null while no prompt was sent (nothing to resume). */
   lastMessageAt: string | null
   messageCount: number
+  /**
+   * What the session's last close left: `complete` when nothing was left to do, `pending` when work or a decision
+   * was still open; null until a close labels it, and again after every prompt.
+   */
+  status: SessionStatus | null
 }
+
+export type SessionStatus = 'complete' | 'pending'
 
 /**
  * What the `/sessions` pane draws: the history as it was read when the command ran.

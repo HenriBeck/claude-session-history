@@ -13,9 +13,11 @@ import {
   nameFromPrompt,
   parseRecord,
   parseSessionsArgs,
+  projectFolderName,
   recordFromTranscript,
   relativeTime,
   resumeCommand,
+  summarizeTranscriptText,
   visibleSessions,
 } from '../hooks/history'
 import type { ExcerptLine, TranscriptSummary } from '../hooks/history'
@@ -67,11 +69,6 @@ function memoryFs(on: On): Map<string, File> {
   return files
 }
 
-/**
- * One message of the main conversation as `$.session.messages({ as: 'api' })` answers it.
- */
-type ConversationMessage = { role: 'user' | 'assistant'; content: { type: string; [field: string]: unknown }[] }
-
 type Setup = {
   cwd: string
   sessionId: string
@@ -80,8 +77,8 @@ type Setup = {
   /** Prompts the session had before the test's own. */
   turns?: number
   dropPrompts?: true
-  /** The main conversation's messages; none unless given. */
-  messages?: ConversationMessage[]
+  /** Transcript entries by session id, kept where Claude Code keeps transcripts of sessions started at `cwd`. */
+  transcripts?: Record<string, unknown[]>
   /** The environment beside HOME; the exit bound is raised to 10 s unless given. */
   env?: Record<string, string>
 }
@@ -104,7 +101,16 @@ function setup(on: On, options: Setup) {
   on('session.turns', () => ({ value: turns }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
-  on('session.messages', () => ({ value: options.messages ?? [] }))
+  on('process.run', ($, e) => {
+    const [command, flag, bytes, path] = e.argv
+    const file = path === undefined ? undefined : files.get(path)
+
+    if (command !== 'tail' || flag !== '-c' || file === undefined) {
+      return { value: { exitCode: 1, stdout: '', stderr: `tail: ${path}: No such file or directory`, isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+
+    return { value: { exitCode: 0, stdout: file.text.slice(-Number(bytes)), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('ui.log', ($, e) => {
     logs.push(`${e.to}: ${e.text}`)
 
@@ -120,6 +126,13 @@ function setup(on: On, options: Setup) {
 
     return { text: e.text }
   })
+
+  for (const [id, entries] of Object.entries(options.transcripts ?? {})) {
+    files.set(`${HOME}/.claude/projects/${projectFolderName(options.cwd)}/${id}.jsonl`, {
+      text: entries.map(entry => `${JSON.stringify(entry)}\n`).join(''),
+      mtimeMs: 0,
+    })
+  }
 
   return { files, clock, logs }
 }
@@ -293,6 +306,21 @@ describe('excerpt', () => {
       { role: 'assistant', text: 'Shipped.' },
     ])
     expect(summary.prompts).toBe(2)
+  })
+
+  test('should read the end of a transcript cut in the middle of a line', async () => {
+    const text = [
+      'ext": "the rest of a line tail cut in half"}]}}',
+      JSON.stringify({ type: 'user', timestamp: '2026-10-01T09:30:00.000Z', message: { content: 'Ship it' } }),
+      '{"type": "assistant", "message": {"content": [{"type": "text", "text": "Ship',
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Shipped.' }] } }),
+      '',
+    ].join('\n')
+
+    expect(summarizeTranscriptText(text).tail).toEqual([
+      { role: 'user', text: 'Ship it' },
+      { role: 'assistant', text: 'Shipped.' },
+    ])
   })
 })
 
@@ -488,11 +516,18 @@ describe('recording', () => {
 
 describe('labeling at close', () => {
   const END = { reason: 'prompt_input_exit', sessionId: 's1', resume: { id: 's1' } } as const
-  const CONVERSATION: ConversationMessage[] = [
-    { role: 'user', content: [{ type: 'text', text: 'Create the repo on GitHub' }] },
-    { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'gh repo view' } }] },
-    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'not found' }] },
-    { role: 'assistant', content: [{ type: 'text', text: 'Should it be public or private?' }] },
+  const CONVERSATION = [
+    { type: 'user', timestamp: '2026-10-11T09:00:00.000Z', message: { role: 'user', content: 'Create the repo on GitHub' } },
+    {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'gh repo view' } }] },
+    },
+    {
+      type: 'user',
+      timestamp: '2026-10-11T09:00:05.000Z',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'not found' }] },
+    },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Should it be public or private?' }] } },
   ]
 
   type Asked = { model: string; system?: string; prompt: string; timeoutMs?: number }
@@ -510,7 +545,7 @@ describe('labeling at close', () => {
   }
 
   test('should label a closed session from the end of its conversation', async ($, on) => {
-    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: CONVERSATION })
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', transcripts: { s1: CONVERSATION } })
     const asked = answer(on, 'Pending')
 
     seed(files, record({ id: 's1', name: 'GitHub repo', labelError: 'no answer (api-error)' }), 1)
@@ -528,7 +563,7 @@ describe('labeling at close', () => {
   })
 
   test('should label the conversation a /clear ended, not the session that follows', async ($, on) => {
-    const { files } = setup(on, { cwd: '/work/a', sessionId: 'fresh', messages: CONVERSATION })
+    const { files } = setup(on, { cwd: '/work/a', sessionId: 'fresh', transcripts: { old: CONVERSATION } })
 
     answer(on, 'complete')
     seed(files, record({ id: 'old', name: 'Before the clear' }), 1)
@@ -539,11 +574,15 @@ describe('labeling at close', () => {
   })
 
   test('should not ask about headless sessions, sessions without a prompt or conversations without text', async ($, on) => {
-    const toolOnly: ConversationMessage[] = [
-      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+    const toolOnly = [
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } },
+      {
+        type: 'user',
+        timestamp: '2026-10-11T09:00:05.000Z',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+      },
     ]
-    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: toolOnly })
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', transcripts: { s1: toolOnly } })
     const asked = answer(on, 'complete')
 
     await $.session.end(END)
@@ -557,8 +596,20 @@ describe('labeling at close', () => {
     expect(logs).toEqual(['debug: session-history: s1 has no conversation text to label'])
   })
 
+  test('should keep why when the session has no transcript where its directory says', async ($, on) => {
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1' })
+    const asked = answer(on, 'complete')
+
+    seed(files, record({ id: 's1' }), 1)
+    await $.session.end(END)
+
+    expect(asked).toEqual([])
+    expect(readRecord(files, 's1').labelError).toBe('no transcript at /home/tester/.claude/projects/-work-a/s1.jsonl')
+    expect(logs).toEqual(['debug: session-history: no transcript at /home/tester/.claude/projects/-work-a/s1.jsonl to label s1'])
+  })
+
   test('should leave a session unlabeled and log why when the reply is not a label', async ($, on) => {
-    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: CONVERSATION })
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', transcripts: { s1: CONVERSATION } })
 
     answer(on, 'Pending — no answer yet')
     seed(files, record({ id: 's1' }), 1)
@@ -569,7 +620,7 @@ describe('labeling at close', () => {
   })
 
   test('should leave a session unlabeled and log why when the model does not answer', async ($, on) => {
-    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: CONVERSATION })
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', transcripts: { s1: CONVERSATION } })
 
     on('model.complete', () => ({ value: { isAnswered: false, reason: 'empty-reply', usage: USAGE } }))
     seed(files, record({ id: 's1' }), 1)
@@ -580,7 +631,7 @@ describe('labeling at close', () => {
   })
 
   test('should let the session end and log the failure when labeling throws', async ($, on) => {
-    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: CONVERSATION })
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', transcripts: { s1: CONVERSATION } })
 
     on('model.complete', () => ({ deny: 'offline' }))
     seed(files, record({ id: 's1' }), 1)

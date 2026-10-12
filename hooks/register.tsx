@@ -8,14 +8,15 @@ import {
   byLastMessage,
   cleanTitle,
   conversationExcerpt,
-  excerptLine,
   fit,
   labelFailureWarning,
   parseRecord,
   parseSessionsArgs,
+  projectFolderName,
   relativeTime,
   resumeCommand,
   statusMarker,
+  summarizeTranscriptText,
   tildify,
   visibleSessions,
 } from './history'
@@ -28,6 +29,12 @@ const MAX_ROWS = 100
 const MAX_TEXT_ROWS = 20
 const TITLE_MODEL = 'haiku'
 const TITLE_PROMPT_LENGTH = 2000
+
+/**
+ * How much of a transcript's end the labeler reads: past any one long tool output, under `$.process.run`'s 4 MiB
+ * output cap.
+ */
+const TRANSCRIPT_TAIL_BYTES = 3_000_000
 
 /**
  * Prompt origins that are the person's own messages: typed at the prompt, or sent through Remote Control.
@@ -55,11 +62,11 @@ type LabelContext = {
   serialize: Serialize
 }
 
-async function historyDir($: Engine): Promise<string> {
-  const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
+async function configDir($: Engine): Promise<string> {
+  const dir = await $.env.get('CLAUDE_CONFIG_DIR')
 
-  if (configDir !== undefined && configDir !== '') {
-    return `${configDir}/session-history`
+  if (dir !== undefined && dir !== '') {
+    return dir
   }
 
   const home = await $.env.get('HOME')
@@ -68,7 +75,11 @@ async function historyDir($: Engine): Promise<string> {
     throw new Error('session-history: neither CLAUDE_CONFIG_DIR nor HOME is set, so there is no place for the history')
   }
 
-  return `${home}/.claude/session-history`
+  return `${home}/.claude`
+}
+
+async function historyDir($: Engine): Promise<string> {
+  return `${await configDir($)}/session-history`
 }
 
 function recordPath(dir: string, id: string): string {
@@ -145,7 +156,10 @@ async function generateName($: Engine, id: string, prompt: string, serialize: Se
 }
 
 /**
- * Labels an ending session complete or pending from the end of its conversation, within what the exit leaves.
+ * Labels an ending session complete or pending from the end of its transcript, within what the exit leaves.
+ *
+ * The transcript is read rather than `$.session.messages`, which no longer answers once an `/exit` has unmounted
+ * the session; it is the ending session's own file, so a `/clear` or `/resume` cannot mix in the next one.
  *
  * Sessions without a record (headless runs) or without a prompt are left alone; a skipped or unusable answer
  * leaves the session unlabeled, so `/sessions` keeps listing it, and keeps why on its record and in the debug log.
@@ -158,8 +172,22 @@ async function labelSession($: Engine, id: string, context: LabelContext): Promi
     return
   }
 
-  const messages = await $.session.messages({ as: 'api' })
-  const excerpt = conversationExcerpt(messages.flatMap(message => excerptLine(message.role, message.content) ?? []))
+  const transcript = `${await configDir($)}/projects/${projectFolderName(record.cwd)}/${id}.jsonl`
+
+  if (!(await $.fs.exists(transcript))) {
+    $.ui.log(`session-history: no transcript at ${transcript} to label ${id}`, { to: 'debug' })
+    await recordLabelError($, id, `no transcript at ${transcript}`, context.serialize)
+
+    return
+  }
+
+  const end = await $.process.run(['tail', '-c', String(TRANSCRIPT_TAIL_BYTES), transcript], { cwd: '/', timeoutMs: 2000 })
+
+  if (end.exitCode !== 0) {
+    throw new Error(`reading the end of ${transcript} failed (exit ${end.exitCode}): ${end.stderr.trim()}`)
+  }
+
+  const excerpt = conversationExcerpt(summarizeTranscriptText(end.stdout).tail)
 
   if (excerpt === '') {
     $.ui.log(`session-history: ${id} has no conversation text to label`, { to: 'debug' })

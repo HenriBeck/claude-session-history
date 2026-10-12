@@ -280,6 +280,36 @@ export function addTranscriptEntry(summary: TranscriptSummary, value: unknown): 
 }
 
 /**
+ * Summarizes transcript text, such as the end of a transcript file; a line that is not JSON (the first one when the
+ * end was cut from a longer file, a write cut short) is skipped.
+ */
+export function summarizeTranscriptText(text: string): TranscriptSummary {
+  const summary = emptyTranscriptSummary()
+
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') {
+      continue
+    }
+
+    let entry: unknown
+
+    try {
+      entry = JSON.parse(line)
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) {
+        throw error
+      }
+
+      continue
+    }
+
+    addTranscriptEntry(summary, entry)
+  }
+
+  return summary
+}
+
+/**
  * The text a person typed in a user entry; null for tool results, engine wrappers and empty content.
  */
 function promptText(content: unknown): string | null {

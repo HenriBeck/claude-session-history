@@ -32,14 +32,17 @@ The `session.end` hook labels the ending session (`e.sessionId`) before it calls
 - **When it labels:** for every end reason (`prompt_input_exit`, `other`, `clear`, `resume`, `logout`), but only
   when the session's record exists and has a `lastMessageAt`.
   - Headless runs never get a record, so they are skipped without extra state.
-- **What the model sees:** the conversation comes from `$.session.messages({ as: 'api' })`, and `conversationExcerpt`
-  turns it into an excerpt:
-  - Only the `text` blocks of user and assistant messages, written as `User:` and `Claude:` paragraphs.
-  - User messages that `promptText` rejects (tool results, wrapper tags, empty) are skipped, and so is the summary
-    a compaction leaves (it opens with "This session is being continued from a previous conversation"), as the
-    backfill skips `isCompactSummary` entries.
+- **What the model sees:** the end of the session's transcript,
+  `<config dir>/projects/<projectFolderName(record.cwd)>/<id>.jsonl`.
+  - The hook reads its last 3,000,000 bytes with `$.process.run(['tail', '-c', …])` and parses them with the
+    backfill's own parser (`summarizeTranscriptText` → `addTranscriptEntry` → `tail`), so the live and backfill
+    excerpts are the same. `$.session.messages` can't be used: it stops answering once `/exit` has unmounted the
+    session.
+  - Only the text of user and assistant entries counts, written as `User:` and `Claude:` paragraphs. Tool traffic,
+    wrapper tags, sidechains, meta entries and compaction summaries are skipped.
   - The excerpt keeps the end of the conversation, at most 8,000 characters. A message longer than that keeps its
     tail.
+  - With no transcript at that path (a worktree move can relocate it), the reason is kept as `labelError`.
 - **The model call:** `$.model.complete` with `model: 'haiku'`, `effort: 'low'` and `maxTokens: 5`. The system prompt
   and prompt come from `labelPrompt(excerpt)`.
   - **Pending:** the last assistant message asks the user a question or for a decision the user has not answered;

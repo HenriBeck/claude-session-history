@@ -16,6 +16,7 @@ import {
   resumeCommand,
 } from '../hooks/history'
 import type { ExcerptLine, TranscriptSummary } from '../hooks/history'
+import { labelPrompt, labelTimeoutMs, limitWarning, parseLabel } from '../hooks/label'
 
 const HOME = '/home/tester'
 const DIR = `${HOME}/.claude/session-history`
@@ -230,6 +231,40 @@ describe('excerpt', () => {
       { role: 'assistant', text: 'Shipped.' },
     ])
     expect(summary.prompts).toBe(2)
+  })
+})
+
+describe('label', () => {
+  test('should put the excerpt and the rules into the label prompt', async () => {
+    const { system, prompt } = labelPrompt('User: Hi\n\nClaude: Hello')
+
+    expect(system).toContain('complete and pending')
+    expect(prompt).toContain('Answer "pending" if:')
+    expect(prompt).toContain('Reply with one word: complete or pending.')
+    expect(prompt.endsWith('<conversation>\nUser: Hi\n\nClaude: Hello\n</conversation>')).toBe(true)
+  })
+
+  test('should read a label reply strictly', async () => {
+    expect(parseLabel('pending')).toBe('pending')
+    expect(parseLabel(' **Complete**.\n')).toBe('complete')
+    expect(parseLabel('"Pending"')).toBe('pending')
+    expect(parseLabel('Pending — the user has not chosen yet')).toBe(null)
+    expect(parseLabel('')).toBe(null)
+  })
+
+  test('should fit the label call into what is left of the exit bound', async () => {
+    expect(labelTimeoutMs(Infinity)).toBe(9000)
+    expect(labelTimeoutMs(10_000)).toBe(9000)
+    expect(labelTimeoutMs(1400)).toBe(1100)
+    expect(labelTimeoutMs(700)).toBe(null)
+  })
+
+  test('should warn while the exit bound is too short for labels', async () => {
+    expect(limitWarning(undefined)).toContain('"CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS": "10000"')
+    expect(limitWarning('')).not.toBe(null)
+    expect(limitWarning('1500')).not.toBe(null)
+    expect(limitWarning('soon')).not.toBe(null)
+    expect(limitWarning('10000')).toBe(null)
   })
 })
 

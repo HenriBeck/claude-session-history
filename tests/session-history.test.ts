@@ -64,6 +64,11 @@ function memoryFs(on: On): Map<string, File> {
   return files
 }
 
+/**
+ * One message of the main conversation as `$.session.messages({ as: 'api' })` answers it.
+ */
+type ConversationMessage = { role: 'user' | 'assistant'; content: { type: string; [field: string]: unknown }[] }
+
 type Setup = {
   cwd: string
   sessionId: string
@@ -72,6 +77,10 @@ type Setup = {
   /** Prompts the session had before the test's own. */
   turns?: number
   dropPrompts?: true
+  /** The main conversation's messages; none unless given. */
+  messages?: ConversationMessage[]
+  /** The environment beside HOME; the exit bound is raised to 10 s unless given. */
+  env?: Record<string, string>
 }
 
 /**
@@ -81,8 +90,9 @@ function setup(on: On, options: Setup) {
   const files = memoryFs(on)
   const clock = mock.clock(on, { now: START })
   let turns = options.turns ?? 0
+  const logs: string[] = []
 
-  mock.env(on, { HOME })
+  mock.env(on, { HOME, ...(options.env ?? { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: '10000' }) })
   on('session.root', () => ({ value: options.cwd }))
   on('session.id', () => ({ value: options.sessionId }))
   on('session.usage', () => ({
@@ -90,6 +100,13 @@ function setup(on: On, options: Setup) {
   }))
   on('session.turns', () => ({ value: turns }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  on('session.messages', () => ({ value: options.messages ?? [] }))
+  on('ui.log', ($, e) => {
+    logs.push(`${e.to}: ${e.text}`)
+
+    return { value: undefined }
+  })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('prompt.submit', ($, e) => {
     if (options.dropPrompts) {
@@ -101,7 +118,7 @@ function setup(on: On, options: Setup) {
     return { text: e.text }
   })
 
-  return { files, clock }
+  return { files, clock, logs }
 }
 
 function summarize(entries: unknown[]): TranscriptSummary {
@@ -411,6 +428,113 @@ describe('recording', () => {
       messageCount: 4,
       status: null,
     }))
+  })
+})
+
+describe('labeling at close', () => {
+  const END = { reason: 'prompt_input_exit', sessionId: 's1', resume: { id: 's1' } } as const
+  const CONVERSATION: ConversationMessage[] = [
+    { role: 'user', content: [{ type: 'text', text: 'Create the repo on GitHub' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'gh repo view' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'not found' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'Should it be public or private?' }] },
+  ]
+
+  type Asked = { model: string; system?: string; prompt: string; timeoutMs?: number }
+
+  function answer(on: On, text: string): Asked[] {
+    const asked: Asked[] = []
+
+    on('model.complete', ($, e) => {
+      asked.push({ model: e.model, system: e.system, prompt: e.prompt, timeoutMs: e.timeoutMs })
+
+      return { value: { isAnswered: true, text, usage: USAGE } }
+    })
+
+    return asked
+  }
+
+  test('should label a closed session from the end of its conversation', async ($, on) => {
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: CONVERSATION })
+    const asked = answer(on, 'Pending')
+
+    seed(files, record({ id: 's1', name: 'GitHub repo' }), 1)
+
+    expect(await $.session.end(END)).toEqual({ sessionId: 's1' })
+    expect(readRecord(files, 's1')).toEqual(record({ id: 's1', name: 'GitHub repo', status: 'pending' }))
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toMatchObject({
+      model: 'haiku',
+      ...labelPrompt('User: Create the repo on GitHub\n\nClaude: Should it be public or private?'),
+    })
+    expect(asked[0]?.timeoutMs).toBeGreaterThan(0)
+    expect(asked[0]?.timeoutMs).toBeLessThanOrEqual(9000)
+    expect(logs).toEqual([])
+  })
+
+  test('should label the conversation a /clear ended, not the session that follows', async ($, on) => {
+    const { files } = setup(on, { cwd: '/work/a', sessionId: 'fresh', messages: CONVERSATION })
+
+    answer(on, 'complete')
+    seed(files, record({ id: 'old', name: 'Before the clear' }), 1)
+    await $.session.end({ reason: 'clear', sessionId: 'old', resume: { id: 'old' } })
+
+    expect(readRecord(files, 'old').status).toBe('complete')
+    expect(files.has(`${DIR}/fresh.json`)).toBe(false)
+  })
+
+  test('should not ask about headless sessions, sessions without a prompt or conversations without text', async ($, on) => {
+    const toolOnly: ConversationMessage[] = [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+    ]
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: toolOnly })
+    const asked = answer(on, 'complete')
+
+    await $.session.end(END)
+    seed(files, record({ id: 's1', lastMessageAt: null }), 1)
+    await $.session.end(END)
+    seed(files, record({ id: 's1' }), 2)
+    await $.session.end(END)
+
+    expect(asked).toEqual([])
+    expect(readRecord(files, 's1').status).toBe(null)
+    expect(logs).toEqual(['debug: session-history: s1 has no conversation text to label'])
+  })
+
+  test('should leave a session unlabeled and log why when the reply is not a label', async ($, on) => {
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: CONVERSATION })
+
+    answer(on, 'Pending — no answer yet')
+    seed(files, record({ id: 's1' }), 1)
+    await $.session.end(END)
+
+    expect(readRecord(files, 's1').status).toBe(null)
+    expect(logs).toEqual(['debug: session-history: labeling s1 got an unexpected reply: "Pending — no answer yet"'])
+  })
+
+  test('should leave a session unlabeled and log why when the model does not answer', async ($, on) => {
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: CONVERSATION })
+
+    on('model.complete', () => ({ value: { isAnswered: false, reason: 'empty-reply', usage: USAGE } }))
+    seed(files, record({ id: 's1' }), 1)
+    await $.session.end(END)
+
+    expect(readRecord(files, 's1').status).toBe(null)
+    expect(logs).toEqual(['debug: session-history: labeling s1 got no answer (empty-reply)'])
+  })
+
+  test('should let the session end and log the failure when labeling throws', async ($, on) => {
+    const { files, logs } = setup(on, { cwd: '/work/a', sessionId: 's1', messages: CONVERSATION })
+
+    on('model.complete', () => ({ deny: 'offline' }))
+    seed(files, record({ id: 's1' }), 1)
+
+    expect(await $.session.end(END)).toEqual({ sessionId: 's1' })
+    expect(readRecord(files, 's1').status).toBe(null)
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toContain('debug: session-history: labeling the session failed (throw)')
+    expect(logs[0]).toContain('offline')
   })
 })
 

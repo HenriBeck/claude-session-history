@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, HookFailure, Register, RenderSurface } from 'claude-code'
+import type { EngineInterface, HookFailure, Register, RenderSurface, UiLogSink } from 'claude-code'
 
 import type { SessionHistoryView, SessionRecord } from '../types'
 import {
@@ -7,6 +7,8 @@ import {
   assertSessionId,
   byLastMessage,
   cleanTitle,
+  conversationExcerpt,
+  excerptLine,
   fit,
   matchesFilter,
   parseRecord,
@@ -15,6 +17,7 @@ import {
   tildify,
 } from './history'
 import type { Touch } from './history'
+import { LABEL_MODEL, labelPrompt, labelTimeoutMs, parseLabel } from './label'
 
 const PANE = 'session-history'
 const MAX_FILES = 300
@@ -32,6 +35,21 @@ const viewAtom = atom({ plugin: 'session-history', key: 'view' } as const, null)
 const filterAtom = atom({ plugin: 'session-history', key: 'filter' } as const, '')
 
 type Engine = EngineInterface
+
+/**
+ * Runs one history write after the ones already queued.
+ */
+type Serialize = <T>(write: () => Promise<T>) => Promise<T>
+
+/**
+ * What a label at close works within: the exit's time bound and its abort signal.
+ */
+type LabelContext = {
+  /** What is left of the exit's bound in milliseconds, read fresh. */
+  remainingMs: () => number
+  signal: AbortSignal
+  serialize: Serialize
+}
 
 async function historyDir($: Engine): Promise<string> {
   const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
@@ -89,7 +107,7 @@ async function touchSession($: Engine, touch: Touch): Promise<{ id: string; isNa
 /**
  * Replaces the prompt-line name with a short title from a small model; a `/rename` meanwhile is kept.
  */
-async function generateName($: Engine, id: string, prompt: string): Promise<void> {
+async function generateName($: Engine, id: string, prompt: string, serialize: Serialize): Promise<void> {
   const reply = await $.model.complete({
     model: TITLE_MODEL,
     system: 'You name coding sessions so they can be found again in a history list.',
@@ -110,14 +128,77 @@ async function generateName($: Engine, id: string, prompt: string): Promise<void
     return
   }
 
-  const path = recordPath(await historyDir($), id)
-  const current = await readRecord($, path)
+  await serialize(async () => {
+    const path = recordPath(await historyDir($), id)
+    const current = await readRecord($, path)
 
-  if (current === null || current.nameSource !== 'prompt') {
+    if (current === null || current.nameSource !== 'prompt') {
+      return
+    }
+
+    await writeRecord($, path, { ...current, name: title, nameSource: 'generated' })
+  })
+}
+
+/**
+ * Labels an ending session complete or pending from the end of its conversation, within what the exit leaves.
+ *
+ * Sessions without a record (headless runs) or without a prompt are left alone; a skipped or unusable answer
+ * leaves the session unlabeled, so `/sessions` keeps listing it, and says why in the debug log.
+ */
+async function labelSession($: Engine, id: string, context: LabelContext): Promise<void> {
+  const path = recordPath(await historyDir($), id)
+  const record = await readRecord($, path)
+
+  if (record === null || record.lastMessageAt === null) {
     return
   }
 
-  await writeRecord($, path, { ...current, name: title, nameSource: 'generated' })
+  const messages = await $.session.messages({ as: 'api' })
+  const excerpt = conversationExcerpt(messages.flatMap(message => excerptLine(message.role, message.content) ?? []))
+
+  if (excerpt === '') {
+    $.ui.log(`session-history: ${id} has no conversation text to label`, { to: 'debug' })
+
+    return
+  }
+
+  const timeoutMs = labelTimeoutMs(context.remainingMs())
+
+  if (timeoutMs === null) {
+    $.ui.log(`session-history: no time left to label ${id} (${Math.floor(context.remainingMs())} ms)`, { to: 'debug' })
+
+    return
+  }
+
+  const reply = await $.model.complete(
+    { model: LABEL_MODEL, ...labelPrompt(excerpt), maxTokens: 5, effort: 'low', timeoutMs },
+    { signal: context.signal },
+  )
+
+  if (!reply.isAnswered) {
+    $.ui.log(`session-history: labeling ${id} got no answer (${reply.reason})`, { to: 'debug' })
+
+    return
+  }
+
+  const status = parseLabel(reply.text)
+
+  if (status === null) {
+    $.ui.log(`session-history: labeling ${id} got an unexpected reply: ${JSON.stringify(reply.text.slice(0, 200))}`, {
+      to: 'debug',
+    })
+
+    return
+  }
+
+  await context.serialize(async () => {
+    const current = await readRecord($, path)
+
+    if (current !== null) {
+      await writeRecord($, path, { ...current, status })
+    }
+  })
 }
 
 async function loadView($: Engine): Promise<SessionHistoryView> {
@@ -185,11 +266,12 @@ function listAsText(view: SessionHistoryView, matching: SessionRecord[]): string
 }
 
 /**
- * Puts a failed history hook in the transcript; the event itself goes on, so a lost entry never blocks a session.
+ * Logs a failed history hook, to the transcript unless `to` says otherwise; the event itself goes on, so a lost
+ * entry never blocks a session.
  */
-function reportFailure($: Engine, what: string, error: HookFailure) {
+function reportFailure($: Engine, what: string, error: HookFailure, to: UiLogSink = 'transcript') {
   if (error.kind !== 're-entry') {
-    $.ui.log(`session-history: ${what} failed (${error.kind}): ${error.message ?? 'no message'}`)
+    $.ui.log(`session-history: ${what} failed (${error.kind}): ${error.message ?? 'no message'}`, { to })
   }
 }
 
@@ -261,7 +343,7 @@ export const register: Register = on => {
 
     if (isNamedFromPrompt) {
       $.clock.after(0, () => {
-        serialized(() => generateName($, id, prompt)).catch(error => {
+        generateName($, id, prompt, serialized).catch(error => {
           $.ui.log(`session-history: naming the session failed: ${error instanceof Error ? error.message : String(error)}`)
         })
       })
@@ -270,6 +352,20 @@ export const register: Register = on => {
     return result
   }).catch(($, e, next) => {
     reportFailure($, 'recording the prompt', next.error)
+
+    return next(e)
+  })
+
+  on('session.end', async ($, e, next) => {
+    await labelSession($, e.sessionId, {
+      remainingMs: () => next.budget.remainingMs,
+      signal: next.signal,
+      serialize: serialized,
+    })
+
+    return next(e)
+  }).catch(($, e, next) => {
+    reportFailure($, 'labeling the session', next.error, 'debug')
 
     return next(e)
   })

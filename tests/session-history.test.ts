@@ -330,7 +330,7 @@ describe('label', () => {
 
     expect(system).toContain('complete and pending')
     expect(prompt).toContain('Answer "pending" if:')
-    expect(prompt).toContain('Reply with one word: complete or pending.')
+    expect(prompt).toContain('Reply with exactly one word, complete or pending, and nothing else.')
     expect(prompt.endsWith('<conversation>\nUser: Hi\n\nClaude: Hello\n</conversation>')).toBe(true)
   })
 
@@ -339,6 +339,8 @@ describe('label', () => {
     expect(parseLabel(' **Complete**.\n')).toBe('complete')
     expect(parseLabel('"Pending"')).toBe('pending')
     expect(parseLabel('Pending — the user has not chosen yet')).toBe(null)
+    expect(parseLabel('Claude asked a question the user has not answered.\n\npending')).toBe('pending')
+    expect(parseLabel('complete\nBecause the work is done.')).toBe(null)
     expect(parseLabel('')).toBe(null)
   })
 

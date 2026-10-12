@@ -33,7 +33,7 @@ export function labelPrompt(excerpt: string): { system: string; prompt: string }
       'Answer "complete" otherwise. Optional offers at the end, such as "I can also add a license", do not make '
         + 'a session pending.',
       '',
-      'Reply with one word: complete or pending.',
+      'Reply with exactly one word, complete or pending, and nothing else.',
       '',
       '<conversation>',
       excerpt,
@@ -43,10 +43,17 @@ export function labelPrompt(excerpt: string): { system: string; prompt: string }
 }
 
 /**
- * The label in a model's reply: one of the two words, with quotes, markdown or a period around it; null otherwise.
+ * The label in a model's reply: one of the two words, with quotes, markdown or a period around it, as the whole
+ * reply or as its last line after a reason the model gave first; null otherwise.
  */
 export function parseLabel(reply: string): SessionStatus | null {
-  const word = reply.toLowerCase().replace(/^[^a-z]+|[^a-z]+$/g, '')
+  const lastLine = reply.trim().split('\n').at(-1) ?? ''
+
+  return labelWord(reply) ?? labelWord(lastLine)
+}
+
+function labelWord(text: string): SessionStatus | null {
+  const word = text.toLowerCase().replace(/^[^a-z]+|[^a-z]+$/g, '')
 
   return word === 'complete' || word === 'pending' ? word : null
 }

@@ -49,7 +49,7 @@ The `session.end` hook labels the ending session (`e.sessionId`) before it calls
     work the user asked for is unfinished, failing or blocked; or the assistant said it would do something next.
   - **Complete:** anything else. Optional offers at the end ("I can also add a license") do not make a session
     pending.
-  - The reply has to be exactly one of the two words.
+  - The reply has to be one of the two words, on its own or as the last line after a reason.
 - **Reading the reply:** `parseLabel` lowercases the reply and strips anything that is not a letter from both ends
   (quotes, markdown, a period). Anything other than `complete` or `pending` is a failure.
 - **Time limit:** the call runs inside the end event's wall-clock bound.

@@ -22,7 +22,8 @@ keeping its terminal tab open or remembering its session ID.
 Clone the repository and link it into Claude Code's skills folder, which loads plugins found there in every session:
 
 ```sh
-ln -s ~/Projects/personal/claude-session-history ~/.claude/skills/session-history
+git clone https://github.com/HenriBeck/claude-session-history.git
+ln -s "$PWD/claude-session-history" ~/.claude/skills/session-history
 ```
 
 New sessions load it as `session-history@skills-dir`. In sessions that are already open, run `/reload-plugins`.

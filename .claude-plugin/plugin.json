@@ -3,5 +3,6 @@
   "version": "0.1.0",
   "description": "Records every session (name, directory, created, last message) to ~/.claude/session-history and resumes them with /sessions",
   "author": { "name": "HenriBeck" },
+  "repository": "https://github.com/HenriBeck/claude-session-history",
   "types": "./types/index.d.ts"
 }

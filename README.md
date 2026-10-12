@@ -25,35 +25,70 @@ keeping its terminal tab open or remembering its session ID.
 
 ## Install
 
-Clone the repository and link it into Claude Code's skills folder, which loads plugins found there in every session:
+Needs Claude Code 2.1.275 or later on macOS or Linux.
+
+1. **Install the plugin.** In any Claude Code session, run:
+
+   ```
+   /plugin install session-history --marketplace HenriBeck/claude-session-history
+   ```
+
+   Answer `y` to add the marketplace, then press Enter to install it for your user. The plugin is active right away
+   and loads in every new session. From a shell, the same install is:
+
+   ```sh
+   claude plugin install session-history --marketplace HenriBeck/claude-session-history
+   ```
+
+2. **Give sessions time to label themselves when they close.** Claude Code gives exit hooks 1.5 s by default, and
+   most labels take longer than that. Add the setting to `~/.claude/settings.json`, inside the `env` block if you
+   already have one:
+
+   ```json
+   {
+     "env": {
+       "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS": "10000"
+     }
+   }
+   ```
+
+   Closing a session then waits for its label, usually 1–3 s and at most 10 s. `/sessions` shows a warning until
+   the setting is there.
+
+3. **Check that it works.** Start a new session and run `/sessions`. It lists every session since the install except
+   the one you are in. To add sessions from before the install, run the [backfill](#backfill).
+
+### Update and uninstall
+
+```sh
+claude plugin update session-history@claude-session-history     # then /reload-plugins in open sessions
+claude plugin uninstall session-history@claude-session-history
+```
+
+Uninstalling leaves the history in `~/.claude/session-history`. Delete that folder to remove it as well.
+
+### From a clone
+
+To work on the plugin, load it from a clone instead. Claude Code loads every plugin in `~/.claude/skills`:
 
 ```sh
 git clone https://github.com/HenriBeck/claude-session-history.git
+mkdir -p ~/.claude/skills
 ln -s "$PWD/claude-session-history" ~/.claude/skills/session-history
 ```
 
-New sessions load it as `session-history@skills-dir`. In sessions that are already open, run `/reload-plugins`.
-Interactive sessions watch the folder, so edits to the repository reload the plugin on their own.
-
-Labeling at close needs more time than Claude Code gives exit hooks by default (1.5 s). Raise it in
-`~/.claude/settings.json`; closing a session then waits for the label, usually 1–3 s and at most 10 s:
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS": "10000"
-  }
-}
-```
-
-`/sessions` shows a warning while the setting is missing.
+New sessions load it as `session-history@skills-dir`; in sessions that are already open, run `/reload-plugins`.
+Interactive sessions watch the folder, so edits to the clone reload the plugin on their own. Keep only one of the
+two installs, since each copy would record every session and register `/sessions`.
 
 ## Backfill
 
 Sessions from before the plugin was installed can be added from the transcripts Claude Code keeps under
-`~/.claude/projects`:
+`~/.claude/projects`. The script lives in this repository, so run it from a clone:
 
 ```sh
+git clone https://github.com/HenriBeck/claude-session-history.git
+cd claude-session-history
 node scripts/backfill.mjs --dry-run   # show what would be written
 node scripts/backfill.mjs
 ```

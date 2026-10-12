@@ -20,6 +20,8 @@ behavior.
 - `docs/superpowers/` — design specs and implementation plans. Update the plan as work progresses.
 - `.claude-plugin/types/` — Claude Code's plugin API types, written by Claude Code when a session loads the plugin.
   Don't edit them by hand.
+- `.claude-plugin/marketplace.json` — makes the repository a marketplace, so the README's one-line `/plugin install`
+  works. Its plugin entry must keep the `name` in `plugin.json`.
 
 ## Commands
 

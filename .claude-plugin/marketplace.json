@@ -1,0 +1,6 @@
+{
+  "name": "claude-session-history",
+  "description": "Keeps a history of your Claude Code sessions and resumes them with /sessions",
+  "owner": { "name": "HenriBeck" },
+  "plugins": [{ "name": "session-history", "source": "./" }]
+}

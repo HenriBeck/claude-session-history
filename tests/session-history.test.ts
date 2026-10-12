@@ -5,7 +5,9 @@ import type { SessionRecord } from '../types'
 import {
   addTranscriptEntry,
   cleanTitle,
+  conversationExcerpt,
   emptyTranscriptSummary,
+  excerptLine,
   mergeRecords,
   nameFromPrompt,
   parseRecord,
@@ -13,7 +15,7 @@ import {
   relativeTime,
   resumeCommand,
 } from '../hooks/history'
-import type { TranscriptSummary } from '../hooks/history'
+import type { ExcerptLine, TranscriptSummary } from '../hooks/history'
 
 const HOME = '/home/tester'
 const DIR = `${HOME}/.claude/session-history`
@@ -163,6 +165,71 @@ describe('helpers', () => {
     expect(relativeTime('2026-10-11T07:00:00.000Z', START)).toBe('3h ago')
     expect(relativeTime('2026-10-08T10:00:00.000Z', START)).toBe('3d ago')
     expect(relativeTime('2026-08-01T10:00:00.000Z', START)).toBe('2026-08-01')
+  })
+})
+
+describe('excerpt', () => {
+  test('should keep the text of a conversation and drop tool traffic and engine wrappers', async () => {
+    expect(excerptLine('user', 'Fix the test')).toEqual({ role: 'user', text: 'Fix the test' })
+    expect(
+      excerptLine('user', [
+        { type: 'text', text: '<system-reminder>\nToday is Monday\n</system-reminder>' },
+        { type: 'text', text: 'Fix the test' },
+      ]),
+    ).toEqual({ role: 'user', text: 'Fix the test' })
+    expect(excerptLine('user', [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }])).toBe(null)
+    expect(
+      excerptLine('assistant', [
+        { type: 'thinking', thinking: 'hmm' },
+        { type: 'text', text: 'Running the tests.' },
+        { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
+      ]),
+    ).toEqual({ role: 'assistant', text: 'Running the tests.' })
+    expect(excerptLine('assistant', [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }])).toBe(null)
+    expect(excerptLine('system', 'x')).toBe(null)
+  })
+
+  test('should keep the end of a conversation within the excerpt length', async () => {
+    const lines: ExcerptLine[] = [
+      { role: 'user', text: 'First request' },
+      { role: 'assistant', text: 'x'.repeat(50) },
+      { role: 'user', text: 'Second request' },
+      { role: 'assistant', text: 'Done. Should I push it?' },
+    ]
+
+    expect(conversationExcerpt(lines, 1000)).toBe(
+      `User: First request\n\nClaude: ${'x'.repeat(50)}\n\nUser: Second request\n\nClaude: Done. Should I push it?`,
+    )
+    expect(conversationExcerpt(lines, 60)).toBe('…xxxx\n\nUser: Second request\n\nClaude: Done. Should I push it?')
+
+    const pasted = conversationExcerpt([{ role: 'user', text: 'y'.repeat(20_000) }])
+
+    expect(pasted).toHaveLength(8000)
+    expect(pasted.startsWith('…y')).toBe(true)
+    expect(conversationExcerpt([])).toBe('')
+  })
+
+  test('should keep the latest messages of a transcript for the labeler', async () => {
+    const summary = summarize([
+      { type: 'user', timestamp: '2026-10-01T09:00:00.000Z', message: { content: 'Old request' } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'z'.repeat(9000) }] } },
+      { type: 'user', isSidechain: true, timestamp: '2026-10-01T09:10:00.000Z', message: { content: 'Explore' } },
+      { type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'Subagent report' }] } },
+      {
+        type: 'user',
+        timestamp: '2026-10-01T09:20:00.000Z',
+        message: { content: [{ type: 'tool_result', content: 'ok' }] },
+      },
+      { type: 'user', timestamp: '2026-10-01T09:30:00.000Z', message: { content: 'Ship it' } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Shipped.' }] } },
+    ])
+
+    expect(summary.tail).toEqual([
+      { role: 'assistant', text: 'z'.repeat(9000) },
+      { role: 'user', text: 'Ship it' },
+      { role: 'assistant', text: 'Shipped.' },
+    ])
+    expect(summary.prompts).toBe(2)
   })
 })
 

@@ -11,6 +11,11 @@ const NAME_RANK = { renamed: 3, generated: 2, prompt: 1 } as const
 const SAME_PROMPT_MS = 60_000
 
 /**
+ * How much of a conversation's end the labeler reads, in characters.
+ */
+const EXCERPT_LENGTH = 8000
+
+/**
  * Transcript user entries the engine wrote around a prompt rather than the person typing one.
  */
 const WRAPPED_INPUT =
@@ -43,6 +48,11 @@ export type SessionFacts = {
   turns: number
   now: string
 }
+
+/**
+ * One message of a conversation as the labeler reads it: who wrote it, and its text.
+ */
+export type ExcerptLine = { role: 'user' | 'assistant'; text: string }
 
 export function assertSessionId(id: string): string {
   if (!SESSION_ID.test(id)) {
@@ -163,6 +173,8 @@ export type TranscriptSummary = {
   promptName: string | null
   aiTitle: string | null
   customTitle: string | null
+  /** The latest messages' text, as much as the labeler's excerpt can use. */
+  tail: ExcerptLine[]
 }
 
 type TranscriptEntry = {
@@ -190,6 +202,7 @@ export function emptyTranscriptSummary(): TranscriptSummary {
     promptName: null,
     aiTitle: null,
     customTitle: null,
+    tail: [],
   }
 }
 
@@ -225,7 +238,19 @@ export function addTranscriptEntry(summary: TranscriptSummary, value: unknown): 
     summary.customTitle = entry.customTitle.trim() === '' ? null : entry.customTitle.trim()
   }
 
-  if (entry.type !== 'user' || entry.isSidechain === true || entry.isMeta === true || entry.isCompactSummary === true) {
+  if (entry.isSidechain === true || entry.isMeta === true || entry.isCompactSummary === true) {
+    return
+  }
+
+  if (entry.type === 'user' || entry.type === 'assistant') {
+    const line = excerptLine(entry.type, entry.message?.content)
+
+    if (line !== null) {
+      keepTail(summary.tail, line)
+    }
+  }
+
+  if (entry.type !== 'user') {
     return
   }
 
@@ -263,6 +288,71 @@ function promptText(content: unknown): string | null {
   const trimmed = text.trim()
 
   return trimmed === '' || WRAPPED_INPUT.test(trimmed) ? null : trimmed
+}
+
+/**
+ * The text of one message for the labeler; null for tool traffic, other roles and messages without text.
+ *
+ * A user message carrying a tool result is tool output, not a prompt; text blocks the engine wrapped around a
+ * prompt (reminders, command echoes) are dropped one by one.
+ */
+export function excerptLine(role: unknown, content: unknown): ExcerptLine | null {
+  if (role !== 'user' && role !== 'assistant') {
+    return null
+  }
+
+  let blocks: { type?: unknown; text?: unknown }[] = []
+
+  if (typeof content === 'string') {
+    blocks = [{ type: 'text', text: content }]
+  } else if (Array.isArray(content)) {
+    blocks = content as { type?: unknown; text?: unknown }[]
+  }
+
+  if (role === 'user' && blocks.some(block => block.type === 'tool_result')) {
+    return null
+  }
+
+  const texts = blocks
+    .flatMap(block => (block.type === 'text' && typeof block.text === 'string' ? [block.text.trim()] : []))
+    .filter(text => text !== '' && (role === 'assistant' || !WRAPPED_INPUT.test(text)))
+
+  return texts.length === 0 ? null : { role, text: texts.join('\n') }
+}
+
+/**
+ * The end of a conversation as `User:` and `Claude:` paragraphs, at most `limit` characters: older messages are
+ * dropped first, and the oldest one kept loses its beginning when it does not fit whole.
+ */
+export function conversationExcerpt(lines: readonly ExcerptLine[], limit = EXCERPT_LENGTH): string {
+  const paragraphs: string[] = []
+  let room = limit
+
+  for (const line of [...lines].reverse()) {
+    if (room <= 0) {
+      break
+    }
+
+    const paragraph = `${line.role === 'user' ? 'User' : 'Claude'}: ${line.text}`
+
+    paragraphs.unshift(paragraph.length > room ? `…${paragraph.slice(paragraph.length - room + 1)}` : paragraph)
+    room -= paragraph.length + 2
+  }
+
+  return paragraphs.join('\n\n')
+}
+
+/**
+ * Appends `line`, then drops the oldest lines once the ones after them fill the excerpt on their own.
+ */
+function keepTail(tail: ExcerptLine[], line: ExcerptLine): void {
+  tail.push(line)
+
+  let length = tail.reduce((sum, kept) => sum + kept.text.length, 0)
+
+  while (tail.length > 1 && length - (tail[0]?.text.length ?? 0) >= EXCERPT_LENGTH) {
+    length -= tail.shift()?.text.length ?? 0
+  }
 }
 
 /**

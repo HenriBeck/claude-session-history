@@ -44,14 +44,16 @@ The `session.end` hook labels the ending session (`e.sessionId`) before it calls
   - **Complete:** anything else. Optional offers at the end ("I can also add a license") do not make a session
     pending.
   - The reply has to be exactly one of the two words.
-- **Reading the reply:** `parseLabel` trims the reply, lowercases it and drops trailing punctuation. Anything other
-  than `complete` or `pending` is a failure.
+- **Reading the reply:** `parseLabel` lowercases the reply and strips anything that is not a letter from both ends
+  (quotes, markdown, a period). Anything other than `complete` or `pending` is a failure.
 - **Time limit:** the call runs inside the end event's wall-clock bound.
-  - It passes `next.signal` and a `timeoutMs` that leaves 300 ms of `next.budget` for the record write and core.
+  - It passes `next.signal` and the `timeoutMs` that `labelTimeoutMs(next.budget.remainingMs)` gives: what is left
+    minus 300 ms for the record write and core, at most 9 s. With less than 500 ms left it skips the call.
   - The bound is 1.5 s unless `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` raises it. The install sets it to `10000`
     in the `env` of `~/.claude/settings.json`.
-- **On failure:** `status` stays `null`, so the session stays listed, and the failure is logged with `$.ui.log`.
-  - An unanswered call or an unexpected reply is logged by the hook itself.
+- **On failure:** `status` stays `null`, so the session stays listed, and the failure goes to the debug log
+  (`$.ui.log(..., { to: 'debug' })`), since the session's screen is closing.
+  - A skipped call, an unanswered call, an empty excerpt or an unexpected reply is logged by the hook itself.
   - A throw or a timeout, including a write error, is logged by the hook's `.catch` as
     `session-history: labeling the session failed (...)`.
   - The `.catch` handler then calls `next(e)`.
@@ -73,6 +75,8 @@ The `session.end` hook labels the ending session (`e.sessionId`) before it calls
 - **Limit warning:** when `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` is unset or below 5000, the pane shows a warning
   line saying that labels at close will time out, and how to set the variable.
 - **Text fallback** (the pane cannot be placed):
+  - The limit warning, when there is one, is its first line, so `claude -p /sessions` shows whether the setting
+    reaches the plugin.
   - Finished sessions are left out, followed by `N finished sessions hidden; /sessions --all lists them`.
   - An `--all` token in the arguments includes them and is removed from the filter.
 
@@ -81,13 +85,16 @@ The `session.end` hook labels the ending session (`e.sessionId`) before it calls
 `node scripts/backfill.mjs --label` runs the normal backfill, then labels every record whose `status` is `null` and
 whose transcript is still there.
 
-- **Reading transcripts:** `addTranscriptEntry` also keeps the API-shaped messages that `conversationExcerpt`
-  needs, so the excerpt and the prompt match the live hook.
+- **Reading transcripts:** `addTranscriptEntry` also keeps the excerpt lines (`excerptLine`, the same function the
+  live hook runs on `$.session.messages`), so the excerpt and the prompt match the live hook.
   - It keeps only the text blocks of user and assistant entries that are not sidechain, meta or compact
     summaries.
   - The text is trimmed to the 8,000-character tail as it streams, so large transcripts stay small in memory.
 - **The model call:** each label is one `claude -p --model haiku --no-session-persistence --tools ""
-  --system-prompt <system>` call.
+  --strict-mcp-config --setting-sources project --disable-slash-commands --system-prompt <system>` call, run in a
+  temporary directory.
+  - The extra flags keep MCP servers, user hooks and skills out of the call: they would add seconds and context to
+    each call.
   - The prompt goes in on stdin.
   - Each call has a 60 s timeout.
   - Four calls run at once.
